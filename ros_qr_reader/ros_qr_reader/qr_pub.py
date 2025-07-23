@@ -8,17 +8,16 @@ from vision_direction.srv import VisionDirection
 import numpy as np
 import cv2
 import re
-# Import the qreader library
-from qreader import QReader
+# Import the pyzbar library
+from pyzbar.pyzbar import decode
 
 class QRCodeDroneService(Node):
     def __init__(self):
         super().__init__('qr_code_drone_service')
-        self.get_logger().info("QR Code Detection Service Started (using qreader)")
+        self.get_logger().info("QR Code Detection Service Started (using pyzbar)")
 
         # --- Member Variables ---
         self.bridge = CvBridge()
-        self.qreader = QReader() # Create the QReader instance once and reuse it
         self.is_detecting = False
         self.current_obj = 0
 
@@ -53,37 +52,34 @@ class QRCodeDroneService(Node):
         try:
             frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
 
-            # Step 1: Detect all QR codes in the frame to get their locations
-            detected_qrs = self.qreader.detect(image=frame)
+            # Use pyzbar.decode to find and decode all QR codes in the frame
+            results = decode(frame)
 
-            # Process each detected QR code individually
-            for qr_info in detected_qrs:
-                # Step 2: Decode the text from this specific QR code
-                decoded_text = self.qreader.decode(image=frame, detection_result=qr_info)
+            # Process each detected QR code
+            for result in results:
+                # result.data is in bytes, so we must decode it to a string
+                decoded_text = result.data.decode('utf-8')
                 
-                # Get corner points for drawing and center calculation
-                corners = qr_info['quad_xy'].astype(np.int32)
+                # result.polygon gives a list of points for the corners
+                corners = np.array([p for p in result.polygon], dtype=np.int32)
 
                 # Draw a box around every detected QR code
                 cv2.polylines(frame, [corners], isClosed=True, color=(255, 128, 0), thickness=2)
 
-                if not decoded_text:
-                    continue # Skip if this QR code could not be decoded
-
-                # --- Validate format of the decoded text ---
+                # --- Validate the text format ---
                 if not re.match(r'^\s*(?:[NSEW]\s*,\s*)*[NSEW]\s*,\s*\d+\s*$', decoded_text):
                     self.get_logger().warn(f"Ignoring QR with invalid format: '{decoded_text}'")
                     continue
-                
+
                 # --- If format is valid, process the data ---
                 try:
                     sequence = [s.strip() for s in decoded_text.split(',')]
                     qr_target = int(sequence[-1])
                     direction = sequence[self.current_obj - 1]
 
-                    # Calculate center point
-                    center_x = float(np.mean(corners[:, 0]))
-                    center_y = float(np.mean(corners[:, 1]))
+                    # Calculate center point from the polygon corners
+                    center_x = float(np.mean([p.x for p in result.polygon]))
+                    center_y = float(np.mean([p.y for p in result.polygon]))
                     center_point = Point(x=center_x, y=center_y, z=0.0)
 
                     # Publish direction and center point
@@ -93,7 +89,7 @@ class QRCodeDroneService(Node):
                     self.publisher_center.publish(center_point)
 
                     self.get_logger().info(f"[Mission {self.current_obj}] Found valid QR. Direction: {direction}")
-                    
+
                     # Highlight the valid, processed QR code
                     cv2.putText(frame, decoded_text, (corners[0,0], corners[0,1]-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
                     cv2.polylines(frame, [corners], isClosed=True, color=(0, 255, 0), thickness=3)
@@ -111,7 +107,7 @@ class QRCodeDroneService(Node):
                     self.get_logger().error(f"Error parsing valid QR data '{decoded_text}': {e}")
 
             # Display the frame
-            cv2.imshow("QR Code Scanner (qreader)", frame)
+            cv2.imshow("QR Code Scanner (pyzbar)", frame)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 self.is_detecting = False
                 self.get_logger().info("Detection stopped by user.")
