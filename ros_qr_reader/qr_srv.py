@@ -1,113 +1,123 @@
 import rclpy
 from rclpy.node import Node
 from cv_bridge import CvBridge
-from sensor_msgs.msg import Image
-from std_msgs.msg import String, Int8
-# from geometry_msgs.msg import Point, Polygon
-# from vision_direction.srv import VisionDirection
+from rclpy.executors import MultiThreadedExecutor
+
+import cv2
+import math
 import numpy as np
 from qreader import QReader
-import cv2
-from cv2 import imshow, waitKey, putText, polylines, circle, FONT_HERSHEY_SIMPLEX, LINE_AA
-# import re
-from vision_msgs.msg import BoundingBox2DArray, BoundingBox2D, Pose2D, Point2D
-# from geometry_msgs.msg import Pose2D
-import math
 
-class QRCodeDroneService(Node):
+from sensor_msgs.msg import Image
+from std_msgs.msg import String, Int8, Bool
+from vision_direction.srv import VisionDirection
+from vision_msgs.msg import BoundingBox2DArray, BoundingBox2D, Pose2D, Point2D
+
+class QrService(Node):
     def __init__(self):
         super().__init__('qr_code_drone_service')
         self.bridge = CvBridge()
         self.QR = QReader(model_size="n")
-        self.is_detecting = True
-        self.current_obj = 0
-        self.direction = ''
+
+        self.is_scanning = True
         self.front_frame: Image = None
         self.bot_frame: Image = None
+        # self.success = True
+
+        # Service Server
+        self.qr_server = self.create_service(VisionDirection, '/qr/start', 10)
         
         # Publishers
         self.qr_bbox_pub = self.create_publisher(BoundingBox2DArray, '/qr/bbox', 10)
+        self.qr_current_cam_pub = self.create_publisher(String, '/qr/current_cam', 10)
+        self.qr_is_scanning_pub = self.create_publisher(Bool, '/qr/is_scanning', 10)
         
         # Subscribers
         self.front_cam_sub = self.create_subscription(Image, '/camera/color/image_raw', self.front_cam_callback, 10)
-        self.bot_cam_sub = self.create_subscription(Image, '/image_raw', self.bot_cam_callback, 10)
-        # self.image_subscriber = self.create_subscription(Image, '/camera/color/image_raw', self.image_callback,10)
-        # self.publisher_direction = self.create_publisher(String, 'qr_direction', 10)
-        # self.publisher_content = self.create_publisher(String, 'qr_content', 10)
-        # self.publisher_target = self.create_publisher(Int8, 'qr_target', 10)
-        # self.publisher_center = self.create_publisher(Point, 'qr_center', 10)
+        self.bot_cam_sub = self.create_subscription(Image, '/camera/front', self.bot_cam_callback, 10)
         
+
         timer_period: float = 0.1
-        self.timer = self.create_timer(timer_period, self.detect)
-        self.success = True
-        # self.detect()
+        self.detect_timer = self.create_timer(timer_period, self.detect)
+        self.is_scanning_timer = self.create_timer(timer_period, self.is_scanning_callback)
     
     def front_cam_callback(self, msg: Image):
-        frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
-        self.front_frame = frame  # Fixed: was setting bot_frame instead of front_frame
-    
+        self.front_frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+        
     def bot_cam_callback(self, msg: Image):
-        frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
-        self.bot_frame = frame
+        self.bot_frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+    
+    def is_scanning_callback(self):
+        msg = Bool()
+        msg.data = self.is_scanning
+        self.qr_is_scanning_pub.publish(msg)
+         
     
     def detect(self):
-        # Check if we have a frame to process
+        if self.is_scanning is False:
+            return
+        
         if self.bot_frame is None:
             self.get_logger().warn("No frame received yet")
             return
         
+        bbox_array = BoundingBox2DArray()
+
         try:
-            # Fixed: Create new QReader instance or reuse self.QR
             detection_results = self.QR.detect(image=self.bot_frame)
             
             # Check if detection_results is valid
             if not detection_results:
                 return
-                
-            bbox_array = BoundingBox2DArray()  # Fixed: renamed from 'bbox' to avoid confusion
             
-            # Fixed: Proper iteration over detection results
+            # publish current_cam
+            current_cam_msg = String()
+            current_cam_msg.data = "bottom"
+            self.qr_current_cam_pub.publish(current_cam_msg)
+
+            # publish BoundingBox    
+            bbox_array = BoundingBox2DArray() 
+            
             for detection in detection_results:
                 if isinstance(detection, dict):
                     # If detection is a dictionary directly
                     detection_data = detection
                 elif isinstance(detection, tuple) and len(detection) == 2:
                     # If detection is a tuple (key, value)
-                    _, detection_data = detection
+                    key, detection_data = detection
                 else:
                     continue
                     
                 current = BoundingBox2D()
                 
-                # Extract center and corners with error checking
                 if 'cxcy' in detection_data and 'quad_xy' in detection_data:
                     center = detection_data['cxcy']
                     corners = detection_data["quad_xy"]
                     
                     # Calculate theta using the box rotation method
-                    theta: float = self.calc_theta(corners, center)
+                    # theta: float = self.calc_theta(corners, center)
                     position = Point2D()
                     position.x = float(center[0])
                     position.y =  float(center[1])
 
-                    # Set the pose - Fixed: Pose2D constructor
                     current.center = Pose2D()
                     current.center.position = position
-                    current.center.theta =  theta
+                    # current.center.theta =  theta
+                    current.center.theta = 0.0
                     
-                    # Set size if available
                     if 'wh' in detection_data:
                         current.size_x, current.size_y = float(detection_data['wh'][0]), float(detection_data['wh'][1])
                     
-                    bbox_array.boxes.append(current)  # Fixed: append to boxes array
-            
-            # Publish the results
-            self.qr_bbox_pub.publish(bbox_array)
+                    bbox_array.boxes.append(current)
             
         except Exception as e:
             self.get_logger().error(f"Error in detect(): {str(e)}")
+            
+        finally:
+            # Publish the results
+            self.qr_bbox_pub.publish(bbox_array)
     
-    def calc_theta(self, corners, center):
+    def calc_theta(self, corners, center) -> float:
         """
         Calculate the rotation angle of the QR code box.
         Uses the first corner to determine rotation angle.
@@ -130,9 +140,19 @@ class QRCodeDroneService(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    qr_drone_service = QRCodeDroneService()
-    rclpy.spin(qr_drone_service)
-    qr_drone_service.destroy_node()
+    qr_service = QrService()
+    # executor = MultiThreadedExecutor(num_threads=1)
+
+    # executor.add_node(qr_service)
+    
+    # try:
+    #     executor.spin()
+    # finally:
+    #     qr_service.destroy_node()
+    #     rclpy.shutdown()
+
+    rclpy.spin(qr_service)
+    qr_service.destroy_node()
     rclpy.shutdown()
 
 if __name__ == '__main__':
