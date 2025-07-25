@@ -25,7 +25,7 @@ class QRCodeDroneService(Node):
         self.srv = self.create_service(VisionDirection, 'start_stop_qr_detection', self.start_stop_callback)
 
         # --- Subscribers & Publishers ---
-        self.image_subscriber = self.create_subscription(Image, '/image_raw', self.image_callback, 10)
+        self.image_subscriber = self.create_subscription(Image, '/camera/color/image_raw', self.image_callback, 10)
         self.publisher_direction = self.create_publisher(String, 'qr_direction', 10)
         self.publisher_target = self.create_publisher(Int8, 'qr_target', 10)
         self.publisher_center = self.create_publisher(Point, 'qr_center_bottom', 10)
